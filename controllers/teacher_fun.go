@@ -4,6 +4,7 @@ import (
 	"errors"
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 	"mental-health-management-be/config"
 	"mental-health-management-be/constants"
 	"mental-health-management-be/converter"
@@ -415,4 +416,104 @@ func BrowsePosts(c *gin.Context) {
 		"posts": postVOs,
 		"total": total,
 	})
+}
+
+func ApproveAppointment(c *gin.Context) {
+
+	// ===== 1. 请求参数 =====
+	var req struct {
+		AppointmentID int  `json:"appointmentID" binding:"required"`
+		Pass          bool `json:"pass"` // true=通过 false=拒绝
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.CommonResp(c, 1, "参数错误", nil)
+		return
+	}
+
+	// ===== 2. 登录信息 =====
+	userIDAny, exists := c.Get("userID")
+	if !exists {
+		response.CommonResp(c, 1, "未登录", nil)
+		return
+	}
+
+	roleAny, _ := c.Get("role")
+
+	teacherUserID := userIDAny.(int)
+	role := roleAny.(int)
+
+	if role != constants.RoleTeacher {
+		response.CommonResp(c, 1, "只有教师可以审批预约", nil)
+		return
+	}
+
+	// ==================================================
+	// ⭐ 事务开始
+	// ==================================================
+	err := config.DB.Transaction(func(tx *gorm.DB) error {
+
+		var appoint models.Appointment
+
+		// ===== 3. 行锁预约 =====
+		if err := tx.
+			Clauses(clause.Locking{Strength: "UPDATE"}).
+			First(&appoint, req.AppointmentID).Error; err != nil {
+			return errors.New("预约不存在")
+		}
+
+		// ===== 4. 已删除检查 =====
+		if appoint.DeletedAt.Valid {
+			return errors.New("预约已被撤销")
+		}
+
+		// ===== 5. 教师权限校验 =====
+		if appoint.TeacherID != teacherUserID {
+			return errors.New("无权限审批该预约")
+		}
+
+		// ===== 6. 状态校验 =====
+		if appoint.Status != 0 {
+			return errors.New("该预约已审批")
+		}
+
+		// ==================================================
+		// ===== 7. 审批逻辑 =====
+		// ==================================================
+
+		if req.Pass {
+
+			// ✅ 审批通过
+			if err := tx.Model(&appoint).
+				Update("status", 1).Error; err != nil {
+				return err
+			}
+
+		} else {
+
+			// ❌ 审批拒绝
+
+			// 1️⃣ 更新状态
+			if err := tx.Model(&appoint).
+				Update("status", 2).Error; err != nil {
+				return err
+			}
+
+			// 2️⃣ 释放 slot（关键）
+			if err := tx.
+				Where("appointment_id = ?", appoint.ID).
+				Delete(&models.AppointmentSlot{}).Error; err != nil {
+				return err
+			}
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		response.CommonResp(c, 1, err.Error(), nil)
+		return
+	}
+
+	response.CommonResp(c, 0, "审批成功", nil)
 }

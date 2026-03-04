@@ -17,35 +17,70 @@ func GetValidateCode(c *gin.Context) {
 	var req struct {
 		Email string `json:"email" binding:"required,email"`
 	}
+
 	if err := c.ShouldBind(&req); err != nil {
 		response.CommonResp(c, 1, "参数错误", nil)
 		return
 	}
 
+	ctx := config.Ctx
+
+	// ===============================
+	// 1️⃣ 防刷限制（60秒）
+	// ===============================
+	limitKey := "validate_limit:" + req.Email
+
+	exist, err := config.RDB.Exists(ctx, limitKey).Result()
+	if err != nil {
+		response.CommonResp(c, 1, "系统错误", nil)
+		return
+	}
+
+	if exist == 1 {
+		response.CommonResp(c, 1, "请求过于频繁，请60秒后再试", nil)
+		return
+	}
+
+	// ===============================
+	// 2️⃣ 生成验证码
+	// ===============================
 	code := utils.GenerateCode()
 
-	// redis key
-	key := "validate_code:" + req.Email
+	// ===============================
+	// 3️⃣ 存 Redis（5分钟有效）
+	// ===============================
+	codeKey := "validate_code:" + req.Email
 
-	// 保存5分钟
-	err := config.RDB.Set(
-		config.Ctx,
-		key,
+	err = config.RDB.Set(
+		ctx,
+		codeKey,
 		code,
 		5*time.Minute,
 	).Err()
 
 	if err != nil {
-		response.CommonResp(c, 1, "验证码生成失败", nil)
+		response.CommonResp(c, 1, "验证码保存失败", nil)
 		return
 	}
 
-	// 真实项目这里发送邮件
-	// sendEmail(req.Email, code)
+	// ===============================
+	// 4️⃣ 设置防刷锁（60秒）
+	// ===============================
+	config.RDB.Set(ctx, limitKey, 1, time.Minute)
 
-	response.CommonResp(c, 0, "验证码发送成功", gin.H{
-		"validateCode": code, // 测试阶段返回
-	})
+	// ===============================
+	// 5️⃣ 发送邮件
+	// ===============================
+	err = utils.SendEmail(req.Email, code)
+	if err != nil {
+		response.CommonResp(c, 1, "邮件发送失败", nil)
+		return
+	}
+
+	// ===============================
+	// 6️⃣ 返回
+	// ===============================
+	response.CommonResp(c, 0, "验证码发送成功", nil)
 }
 
 func Register(c *gin.Context) {

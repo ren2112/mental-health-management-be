@@ -59,6 +59,7 @@ func InitDB() {
 		&models.Manager{},
 		&models.Post{},
 		&models.Appointment{},
+		&models.AppointmentSlot{},
 	)
 
 	if err != nil {

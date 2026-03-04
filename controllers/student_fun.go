@@ -1,13 +1,18 @@
 package controllers
 
 import (
+	"errors"
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 	"mental-health-management-be/config"
 	"mental-health-management-be/constants"
 	"mental-health-management-be/converter"
 	"mental-health-management-be/models"
 	"mental-health-management-be/response"
 	"mental-health-management-be/utils"
+	"strings"
+	"time"
 )
 
 func UpdateStudentSelfInformation(c *gin.Context) {
@@ -127,5 +132,340 @@ func GetStudentInformation(c *gin.Context) {
 	// ===== 返回 =====
 	response.CommonResp(c, 0, "获取成功", gin.H{
 		"student": studentVO,
+	})
+}
+
+func CreateAppointment(c *gin.Context) {
+
+	// ===== 1. 请求参数 =====
+	var req struct {
+		TeacherID int    `json:"teacherID" binding:"required"`
+		Title     string `json:"title" binding:"required"`
+		Detail    string `json:"detail" binding:"required"`
+		StartTime int64  `json:"startTime" binding:"required"`
+		EndTime   int64  `json:"endTime" binding:"required"`
+	}
+
+	if err := c.ShouldBind(&req); err != nil {
+		response.CommonResp(c, 1, "参数错误", nil)
+		return
+	}
+
+	// ===== 2. 登录信息 =====
+	userIDAny, exists := c.Get("userID")
+	if !exists {
+		response.CommonResp(c, 1, "未登录", nil)
+		return
+	}
+
+	roleAny, _ := c.Get("role")
+
+	userID := userIDAny.(int)
+	role := roleAny.(int)
+
+	// ===== 3. 权限校验 =====
+	if role != constants.RoleStudent {
+		response.CommonResp(c, 1, "只有学生可以发起预约", nil)
+		return
+	}
+
+	// ===== 4. 时间转换（毫秒时间戳）=====
+	start := time.UnixMilli(req.StartTime).Local()
+	end := time.UnixMilli(req.EndTime).Local()
+
+	// ===== 5. 基础校验 =====
+	if !start.Before(end) {
+		response.CommonResp(c, 1, "结束时间必须晚于开始时间", nil)
+		return
+	}
+
+	// ===== 6. 时间合法性 =====
+	// start/end 必须是 slot 起点
+	if !utils.IsValidSlotStart(start) ||
+		!utils.IsValidSlotStart(end) {
+		response.CommonResp(c, 1, "时间必须为整点或半点", nil)
+		return
+	}
+
+	// 覆盖范围必须在工作时间
+	if !utils.IsWithinWorkTime(start) ||
+		!utils.IsWithinWorkTime(end.Add(-time.Second)) {
+		response.CommonResp(c, 1, "仅允许08:00-17:00预约", nil)
+		return
+	}
+
+	if !utils.IsValidAppointmentDate(start) ||
+		!utils.IsValidAppointmentDate(end.Add(-time.Second)) {
+		response.CommonResp(c, 1, "只能预约当前周和下周工作日", nil)
+		return
+	}
+
+	// ===== 7. 生成 slots =====
+	slots := utils.GenerateSlots(start, end)
+
+	var appointmentID int
+
+	// ====================================
+	// ===== 8. 事务（核心并发安全） =====
+	// ====================================
+	err := config.DB.Transaction(func(tx *gorm.DB) error {
+
+		// 1️⃣ 创建预约主记录
+		appoint := models.Appointment{
+			Title:     req.Title,
+			Detail:    req.Detail,
+			StudentID: userID,
+			TeacherID: req.TeacherID,
+			Status:    0,
+			StartTime: start,
+			EndTime:   end,
+		}
+
+		if err := tx.Create(&appoint).Error; err != nil {
+			return err
+		}
+
+		// 2️⃣ 插入 slots（⭐ 冲突检测发生在这里）
+		for _, s := range slots {
+
+			slot := models.AppointmentSlot{
+				TeacherID:     req.TeacherID,
+				SlotTime:      s,
+				AppointmentID: appoint.ID,
+			}
+
+			if err := tx.Create(&slot).Error; err != nil {
+
+				// MySQL 唯一键冲突
+				if strings.Contains(err.Error(), "Duplicate") {
+					return errors.New("时间段已被预约")
+				}
+
+				return err
+			}
+		}
+
+		appointmentID = appoint.ID
+		return nil
+	})
+
+	// ===== 9. 事务结果 =====
+	if err != nil {
+
+		if err.Error() == "时间段已被预约" {
+			response.CommonResp(c, 1, "该时间段已被预约", nil)
+			return
+		}
+
+		response.CommonResp(c, 1, "预约失败", nil)
+		return
+	}
+
+	// ===== 10. 返回 =====
+	response.CommonResp(c, 0, "预约成功", gin.H{
+		"appointmentID": appointmentID,
+	})
+}
+
+func WithdrawAppointment(c *gin.Context) {
+
+	// ===== 1. 请求参数 =====
+	var req struct {
+		AppointmentID int `json:"appointmentID" binding:"required"`
+	}
+
+	if err := c.ShouldBind(&req); err != nil {
+		response.CommonResp(c, 1, "参数错误", nil)
+		return
+	}
+
+	// ===== 2. 登录信息 =====
+	userIDAny, exists := c.Get("userID")
+	if !exists {
+		response.CommonResp(c, 1, "未登录", nil)
+		return
+	}
+
+	roleAny, _ := c.Get("role")
+
+	userID := userIDAny.(int)
+	role := roleAny.(int)
+
+	if role != constants.RoleStudent {
+		response.CommonResp(c, 1, "只有学生可以撤销预约", nil)
+		return
+	}
+
+	// ==================================================
+	// ⭐ 事务：保证 slot + appointment 一致删除
+	// ==================================================
+	err := config.DB.Transaction(func(tx *gorm.DB) error {
+
+		var appoint models.Appointment
+
+		// ===== 3. 行锁（防并发撤销/审核）=====
+		if err := tx.
+			Clauses(clause.Locking{Strength: "UPDATE"}).
+			First(&appoint, req.AppointmentID).Error; err != nil {
+			return errors.New("预约不存在")
+		}
+
+		// ===== 4. 权限校验 =====
+		if appoint.StudentID != userID {
+			return errors.New("无权限操作该预约")
+		}
+
+		// ===== 5. 已删除检查 =====
+		if appoint.DeletedAt.Valid {
+			return errors.New("预约已撤销")
+		}
+
+		// ===== 6. 删除 Slot（释放时间资源）=====
+		if err := tx.
+			Where("appointment_id = ?", appoint.ID).
+			Delete(&models.AppointmentSlot{}).Error; err != nil {
+			return err
+		}
+
+		// ===== 7. 删除 Appointment（软删除）=====
+		if err := tx.Delete(&appoint).Error; err != nil {
+			return err
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		response.CommonResp(c, 1, err.Error(), nil)
+		return
+	}
+
+	response.CommonResp(c, 0, "撤销成功", nil)
+}
+
+func GetSelfAppointments(c *gin.Context) {
+
+	// ===== 请求参数 =====
+	var req struct {
+		PageSize      int  `json:"pageSize"`
+		PageNum       int  `json:"pageNum"`
+		ApproveStatus *int `json:"approveStatus"`
+	}
+
+	if err := c.ShouldBind(&req); err != nil {
+		response.CommonResp(c, 1, "参数错误", nil)
+		return
+	}
+
+	// ===== 获取当前学生ID =====
+	userIDAny, exists := c.Get("userID")
+	if !exists {
+		response.CommonResp(c, 1, "用户未登录", nil)
+		return
+	}
+	studentID := userIDAny.(int)
+
+	db := config.DB
+
+	query := db.Model(&models.Appointment{}).
+		Where("student_id = ?", studentID)
+
+	// ===== 状态筛选（可选）=====
+	if req.ApproveStatus != nil {
+		query = query.Where("status = ?", *req.ApproveStatus)
+	}
+
+	// ===== 总数 =====
+	var total int64
+	query.Count(&total)
+
+	// ===== 分页 =====
+	offset := (req.PageNum - 1) * req.PageSize
+
+	var appointments []models.Appointment
+	err := query.
+		Preload("Teacher").
+		Order("start_time desc").
+		Limit(req.PageSize).
+		Offset(offset).
+		Find(&appointments).Error
+
+	if err != nil {
+		response.CommonResp(c, 1, "查询失败", nil)
+		return
+	}
+
+	// ===== VO转换 =====
+	voList := converter.ToAppointmentVOList(appointments)
+
+	response.CommonResp(c, 0, "success", gin.H{
+		"appointments": voList,
+		"total":        total,
+	})
+}
+
+func GetTeacherAppointment(c *gin.Context) {
+
+	// ===== Query 参数 =====
+	var query struct {
+		TeacherID int64 `form:"teacherID"`
+	}
+
+	_ = c.ShouldBindQuery(&query)
+
+	// ===== 如果没传 teacherID -> 默认自己 =====
+	if query.TeacherID == 0 {
+		userIDAny, exists := c.Get("userID")
+		if !exists {
+			response.CommonResp(c, 1, "用户未登录", nil)
+			return
+		}
+		query.TeacherID = userIDAny.(int64)
+	}
+
+	// =============================
+	// 计算 本周 + 下周 时间范围
+	// =============================
+	now := time.Now()
+
+	// Go中 Sunday=0
+	weekday := int(now.Weekday())
+	if weekday == 0 {
+		weekday = 7
+	}
+
+	// 本周一
+	startOfWeek := time.Date(
+		now.Year(),
+		now.Month(),
+		now.Day()-(weekday-1),
+		0, 0, 0, 0,
+		now.Location(),
+	)
+
+	// 下下周一（结束时间）
+	endTime := startOfWeek.AddDate(0, 0, 14)
+
+	db := config.DB
+
+	var appointments []models.Appointment
+
+	err := db.Model(&models.Appointment{}).
+		Where("teacher_id = ?", query.TeacherID).
+		Where("start_time >= ? AND start_time < ?", startOfWeek, endTime).
+		Where("status IN ?", []int{0, 1}).
+		Order("start_time asc").
+		Find(&appointments).Error
+
+	if err != nil {
+		response.CommonResp(c, 1, "查询失败", nil)
+		return
+	}
+
+	// ===== VO转换 =====
+	voList := converter.ToAppointmentVOList(appointments)
+
+	response.CommonResp(c, 0, "success", gin.H{
+		"appointments": voList,
 	})
 }

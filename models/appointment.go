@@ -1,6 +1,9 @@
 package models
 
-import "time"
+import (
+	"gorm.io/gorm"
+	"time"
+)
 
 type Appointment struct {
 	ID         int       `gorm:"primaryKey;autoIncrement;comment:预约ID"`
@@ -13,7 +16,10 @@ type Appointment struct {
 	EndTime    time.Time `gorm:"type:datetime;not null;comment:结束时间"`
 	CreateTime time.Time `gorm:"type:datetime;not null;default:CURRENT_TIMESTAMP;comment:新建时间"`
 
-	// 可选关联（推荐加，毕业设计加分）
+	// 可选关联
 	Student Student `gorm:"foreignKey:StudentID"`
 	Teacher Teacher `gorm:"foreignKey:TeacherID"`
+	// 新增关联
+	Slots     []AppointmentSlot `gorm:"foreignKey:AppointmentID"`
+	DeletedAt gorm.DeletedAt    // 软删除字段
 }

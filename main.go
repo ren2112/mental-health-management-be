@@ -40,6 +40,12 @@ func main() {
 		auth.POST("/update-post", controllers.UpdatePost)
 		auth.POST("/delete-post", controllers.DeletePost)
 		auth.POST("/browse", controllers.BrowsePosts)
+
+		auth.POST("/appoint", controllers.CreateAppointment)
+		auth.POST("/withdraw-appointment", controllers.WithdrawAppointment)
+		auth.POST("/approve-appointment", controllers.ApproveAppointment)
+		auth.POST("/self-appointments", controllers.GetSelfAppointments)
+		auth.GET("/get-teacher-appointment", controllers.GetTeacherAppointment)
 	}
 
 	manage := r.Group("/api/auth/manage")
