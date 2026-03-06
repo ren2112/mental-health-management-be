@@ -16,6 +16,7 @@ func main() {
 	config.InitRedis()
 
 	r := gin.Default()
+	r.Static("/public", "./public")
 
 	noAuth := r.Group("/api/noauth")
 	{
@@ -35,6 +36,7 @@ func main() {
 		auth.GET("/manager-information", controllers.GetManagerInformation)
 		auth.POST("/update-password", controllers.UpdatePassword)
 
+		auth.POST("/upload-cover", controllers.UploadCover)
 		auth.POST("/publish-post", controllers.PublishPost)
 		auth.GET("/post", controllers.GetPost)
 		auth.POST("/update-post", controllers.UpdatePost)

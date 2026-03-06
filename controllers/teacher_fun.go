@@ -2,16 +2,23 @@ package controllers
 
 import (
 	"errors"
+	"fmt"
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
+	"math/rand"
 	"mental-health-management-be/config"
 	"mental-health-management-be/constants"
 	"mental-health-management-be/converter"
 	"mental-health-management-be/models"
 	"mental-health-management-be/response"
 	"mental-health-management-be/utils"
+	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
+	"strings"
+	"time"
 )
 
 func UpdateTeacherSelfInformation(c *gin.Context) {
@@ -516,4 +523,86 @@ func ApproveAppointment(c *gin.Context) {
 	}
 
 	response.CommonResp(c, 0, "审批成功", nil)
+}
+
+func UploadCover(c *gin.Context) {
+
+	// ===== 1. 获取文件 =====
+	file, err := c.FormFile("file")
+	if err != nil {
+		response.CommonResp(c, 1, "请选择上传文件", nil)
+		return
+	}
+
+	// ===== 2. 检查文件后缀 =====
+	ext := strings.ToLower(filepath.Ext(file.Filename))
+
+	allowExt := map[string]bool{
+		".jpg":  true,
+		".jpeg": true,
+		".png":  true,
+		".webp": true,
+	}
+
+	if !allowExt[ext] {
+		response.CommonResp(c, 1, "只允许上传 jpg/png/jpeg/webp 图片", nil)
+		return
+	}
+
+	// ===== 3. 打开文件检测 MIME =====
+	src, err := file.Open()
+	if err != nil {
+		response.CommonResp(c, 1, "文件读取失败", nil)
+		return
+	}
+	defer src.Close()
+
+	buffer := make([]byte, 512)
+	_, err = src.Read(buffer)
+	if err != nil {
+		response.CommonResp(c, 1, "文件读取失败", nil)
+		return
+	}
+
+	contentType := http.DetectContentType(buffer)
+
+	if !strings.HasPrefix(contentType, "image/") {
+		response.CommonResp(c, 1, "上传文件必须是图片", nil)
+		return
+	}
+
+	// ===== 4. 确保目录存在 =====
+	dir := "./public"
+
+	if _, err := os.Stat(dir); os.IsNotExist(err) {
+		err = os.MkdirAll(dir, os.ModePerm)
+		if err != nil {
+			response.CommonResp(c, 1, "创建目录失败", nil)
+			return
+		}
+	}
+
+	// ===== 5. 生成文件名 =====
+	filename := fmt.Sprintf(
+		"%d_%d%s",
+		time.Now().Unix(),
+		rand.Intn(1000),
+		ext,
+	)
+
+	savePath := filepath.Join(dir, filename)
+
+	// ===== 6. 保存文件 =====
+	err = c.SaveUploadedFile(file, savePath)
+	if err != nil {
+		response.CommonResp(c, 1, "上传失败", nil)
+		return
+	}
+
+	// ===== 7. 返回地址 =====
+	coverURL := "/public/" + filename
+
+	response.CommonResp(c, 0, "上传成功", gin.H{
+		"cover": coverURL,
+	})
 }
