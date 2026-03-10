@@ -1,10 +1,15 @@
 package controllers
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"github.com/gin-gonic/gin"
+	"github.com/sashabaranov/go-openai"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
+	"io"
 	"mental-health-management-be/config"
 	"mental-health-management-be/constants"
 	"mental-health-management-be/converter"
@@ -468,4 +473,106 @@ func GetTeacherAppointment(c *gin.Context) {
 	response.CommonResp(c, 0, "success", gin.H{
 		"appointments": voList,
 	})
+}
+
+func AIBot(c *gin.Context) {
+
+	// ===== 1. 获取参数 =====
+	var req struct {
+		Content string `json:"content"`
+	}
+	if err := c.ShouldBind(&req); err != nil {
+		response.CommonResp(c, 1, "参数错误", nil)
+		return
+	}
+
+	content := req.Content
+	if content == "" {
+		response.CommonResp(c, 1, "content不能为空", nil)
+		return
+	}
+
+	// ===== 2. 提示词拼接 =====
+	prompt := fmt.Sprintf(`
+你是一名专业的大学生心理健康助手，请用温和、共情、积极的语气回复学生的问题。
+
+要求：
+1. 给予情绪理解
+2. 提供积极建议
+3. 回答简洁清晰
+4. 如果问题涉及严重心理问题，建议寻求专业心理咨询师
+
+学生的问题：
+%s
+`, content)
+
+	// ===== 3. 创建AI客户端 =====
+	configAI := openai.DefaultConfig("ms-bd647c5f-813c-4eec-abf1-02bf94c30ca7")
+	configAI.BaseURL = "https://api-inference.modelscope.cn/v1"
+
+	client := openai.NewClientWithConfig(configAI)
+
+	// ===== 4. 创建流式请求 =====
+	stream, err := client.CreateChatCompletionStream(
+		context.Background(),
+		openai.ChatCompletionRequest{
+			Model: "Qwen/Qwen3.5-27B",
+			Messages: []openai.ChatCompletionMessage{
+				{
+					Role:    openai.ChatMessageRoleUser,
+					Content: prompt,
+				},
+			},
+			Stream: true,
+		},
+	)
+
+	if err != nil {
+		response.CommonResp(c, 1, "AI服务调用失败", nil)
+		return
+	}
+
+	defer stream.Close()
+
+	// ===== 5. 设置 SSE 流式返回 =====
+	c.Writer.Header().Set("Content-Type", "text/event-stream")
+	c.Writer.Header().Set("Cache-Control", "no-cache")
+	c.Writer.Header().Set("Connection", "keep-alive")
+	c.Writer.Header().Set("Transfer-Encoding", "chunked")
+
+	c.Writer.Flush()
+
+	// ===== 6. 循环读取AI返回 =====
+	for {
+
+		resp, err := stream.Recv()
+
+		if err == io.EOF {
+			break
+		}
+
+		if err != nil {
+			break
+		}
+
+		content := resp.Choices[0].Delta.Content
+		if content == "" {
+			continue
+		}
+
+		// 构造返回
+		respData := gin.H{
+			"code": 0,
+			"msg":  "success",
+			"data": gin.H{
+				"response": content,
+			},
+		}
+
+		jsonData, _ := json.Marshal(respData)
+
+		fmt.Fprintf(c.Writer, "data: %s\n\n", jsonData)
+
+		c.Writer.Flush()
+	}
 }

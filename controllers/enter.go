@@ -6,6 +6,7 @@ import (
 	"gorm.io/gorm"
 	"mental-health-management-be/config"
 	"mental-health-management-be/constants"
+	"mental-health-management-be/converter"
 	"mental-health-management-be/models"
 	"mental-health-management-be/response"
 	"mental-health-management-be/utils"
@@ -156,6 +157,7 @@ func Login(c *gin.Context) {
 	var (
 		userID  int
 		hashPwd string
+		userVO  interface{} // ⭐ 返回不同类型
 		err     error
 	)
 
@@ -163,30 +165,39 @@ func Login(c *gin.Context) {
 	switch req.Type {
 
 	case constants.RoleStudent:
+
 		var student models.Student
 		err = config.DB.Where("email = ?", req.Email).
 			First(&student).Error
+
 		if err == nil {
 			userID = student.ID
 			hashPwd = student.Password
+			userVO = converter.ToStudentVO(student) // ⭐ 转换VO
 		}
 
 	case constants.RoleTeacher:
+
 		var teacher models.Teacher
 		err = config.DB.Where("email = ?", req.Email).
 			First(&teacher).Error
+
 		if err == nil {
 			userID = teacher.ID
 			hashPwd = teacher.Password
+			userVO = converter.ToTeacherVO(teacher)
 		}
 
 	case constants.RoleAdmin:
+
 		var manager models.Manager
 		err = config.DB.Where("email = ?", req.Email).
 			First(&manager).Error
+
 		if err == nil {
 			userID = manager.ID
 			hashPwd = manager.Password
+			userVO = converter.ToManagerVO(manager)
 		}
 
 	default:
@@ -209,15 +220,18 @@ func Login(c *gin.Context) {
 		return
 	}
 
-	// ⭐ 生成JWT（身份写入）
+	// ⭐ 生成JWT
 	token, err := utils.GenerateJWT(userID, req.Type)
 	if err != nil {
 		response.CommonResp(c, 1, "生成Token失败", nil)
 		return
 	}
 
+	// ⭐ 返回 token + user
 	response.CommonResp(c, 0, "登录成功", gin.H{
 		"token": token,
+		"user":  userVO,
+		"type":  req.Type,
 	})
 }
 

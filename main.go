@@ -16,6 +16,7 @@ func main() {
 	config.InitRedis()
 
 	r := gin.Default()
+	r.Use(middleware.CORSMiddleware())
 	r.Static("/public", "./public")
 
 	noAuth := r.Group("/api/noauth")
@@ -48,6 +49,8 @@ func main() {
 		auth.POST("/approve-appointment", controllers.ApproveAppointment)
 		auth.POST("/self-appointments", controllers.GetSelfAppointments)
 		auth.GET("/get-teacher-appointment", controllers.GetTeacherAppointment)
+
+		auth.POST("/ai-bot", controllers.AIBot)
 	}
 
 	manage := r.Group("/api/auth/manage")

@@ -8,11 +8,11 @@ import (
 // 单个转换
 func ToStudentVO(s models.Student) vo.StudentVO {
 	return vo.StudentVO{
-		StudentID:   s.ID,
-		StudentName: s.Name,
-		Sex:         s.Sex,
-		StudentNum:  s.StudentNo,
-		Email:       s.Email,
+		StudentID: s.ID,
+		Name:      s.Name,
+		Sex:       s.Sex,
+		StudentNo: s.StudentNo,
+		Email:     s.Email,
 	}
 }
 
